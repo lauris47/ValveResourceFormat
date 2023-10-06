@@ -159,9 +159,9 @@ namespace GUI.Types.Renderer
                         verts[collisionAttributeIndex].Add(vec.X);
                         verts[collisionAttributeIndex].Add(vec.Y);
                         verts[collisionAttributeIndex].Add(vec.Z);
-                        //color red
-                        verts[collisionAttributeIndex].Add(1);
+                        //color green
                         verts[collisionAttributeIndex].Add(0);
+                        verts[collisionAttributeIndex].Add(1);
                         verts[collisionAttributeIndex].Add(0);
                         verts[collisionAttributeIndex].Add(0.3f);
                     }

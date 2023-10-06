@@ -177,9 +177,10 @@ namespace ValveResourceFormat.IO
                 var worldNode = (VWorldNode)worldResource.DataBlock;
                 var worldNodeModels = LoadWorldNodeModels(worldNode);
 
+                var worldNodesParent = scene.CreateNode("world_nodes");
                 foreach (var (Model, Name, Transform) in worldNodeModels)
                 {
-                    LoadModel(exportedModel, scene, Model, Name, Transform, loadedMeshDictionary);
+                    LoadModel(exportedModel, scene, Model, Name, Transform, loadedMeshDictionary, worldNodesParent);
                 }
             }
 
@@ -207,9 +208,27 @@ namespace ValveResourceFormat.IO
         private void LoadEntityMeshes(ModelRoot exportedModel, Scene scene, VEntityLump entityLump,
             Dictionary<string, Mesh> loadedMeshDictionary)
         {
+            var entitiesNode = scene.CreateNode("entities");
             foreach (var entity in entityLump.GetEntities())
             {
                 var modelName = entity.GetProperty<string>("model");
+                var className = entity.GetProperty<string>("classname");
+                var props = entity.Properties.ToDictionary(e => e.Value.Name, e => e.Value.Data);
+                var transform = EntityTransformHelper.CalculateTransformationMatrix(entity);
+                if (!string.IsNullOrEmpty(entity.GetProperty<string>("origin")))
+                {
+                    // remove xform props
+                    props.Remove("origin");
+                    props.Remove("angles");
+                    props.Remove("scales");
+                    if (className != null)
+                    {
+                        var node = entitiesNode.CreateNode(className);
+                        // Swap Rotate upright, scale inches to meters.
+                        node.WorldMatrix = transform * TRANSFORMSOURCETOGLTF;
+                        node.Extras = JsonContent.Serialize(props);
+                    }
+                }
                 if (string.IsNullOrEmpty(modelName))
                 {
                     // Only worrying about models for now
@@ -232,10 +251,9 @@ namespace ValveResourceFormat.IO
                     skinName = null;
                 }
 
-                var transform = EntityTransformHelper.CalculateTransformationMatrix(entity);
                 // Add meshes and their skeletons
                 LoadModel(exportedModel, scene, model, Path.GetFileNameWithoutExtension(modelName),
-                    transform, loadedMeshDictionary, skinName);
+                    transform, loadedMeshDictionary, entitiesNode, skinName, JsonContent.Serialize(props));
             }
 
             foreach (var childEntityName in entityLump.GetChildEntityNames())
@@ -348,14 +366,17 @@ namespace ValveResourceFormat.IO
         }
 
         private void LoadModel(ModelRoot exportedModel, Scene scene, VModel model, string name,
-            Matrix4x4 transform, IDictionary<string, Mesh> loadedMeshDictionary, string skinName = null)
+            Matrix4x4 transform, IDictionary<string, Mesh> loadedMeshDictionary,
+            IVisualNodeContainer parentNode = null,
+            string skinName = null,
+            Nullable<JsonContent> extras = null)
         {
 #if DEBUG
             ProgressReporter?.Report($"Loading model {name}");
 #endif
 
             CancellationToken.ThrowIfCancellationRequested();
-            var (skeletonNode, joints) = CreateGltfSkeleton(scene, model.Skeleton, name);
+            var (skeletonNode, joints) = CreateGltfSkeleton(parentNode ?? scene, model.Skeleton, name);
 
             if (skeletonNode != null)
             {
@@ -516,16 +537,26 @@ namespace ValveResourceFormat.IO
                     meshName = string.Concat(meshName, ".", skinName);
                 }
 
-                var node = AddMeshNode(exportedModel, scene, meshName,
+                var node = AddMeshNode(exportedModel, parentNode ?? scene, meshName,
                     m.Mesh, joints, loadedMeshDictionary, skinMaterialPath,
                     model, m.MeshIndex);
                 if (node != null)
                 {
                     node.WorldMatrix = transform;
+                    if (extras.HasValue)
+                    {
+                        node.Extras = extras.Value;
+                    }
 
                     DebugValidateGLTF();
                 }
             }
+
+
+            var physNode = AddModelPhys(exportedModel, parentNode ?? scene, name,
+                loadedMeshDictionary, model);
+            physNode.WorldMatrix = transform * TRANSFORMSOURCETOGLTF;
+
 
             // Even though that's not documented, order matters.
             // WorldMatrix should only be set after everything else.
@@ -567,6 +598,106 @@ namespace ValveResourceFormat.IO
             return embeddedMeshes.Concat(refMeshes);
         }
 
+        private static Node AddModelPhys(ModelRoot exportedModel, IVisualNodeContainer parentNode, string name,
+            IDictionary<string, Mesh> loadedMeshDictionary,
+            VModel model = null)
+        {
+            var phys = model.GetEmbeddedPhys();
+            if (phys == null)
+            {
+                return null;
+            }
+
+            var physName = string.Concat(name, ".PHY");
+            var newNode = parentNode.CreateNode(physName);
+            if (loadedMeshDictionary.TryGetValue(physName, out var existingMesh))
+            {
+                // Make a new node that uses the existing mesh
+                newNode.Mesh = existingMesh;
+                return newNode;
+            }
+
+            var mesh = exportedModel.CreateMesh(physName);
+            mesh.Name = physName;
+
+            var groupCount = phys.CollisionAttributes.Count;
+            var verts = new List<Vector3>[groupCount];
+            var inds = new List<int>[groupCount];
+            for (var i = 0; i < groupCount; i++)
+            {
+                verts[i] = new();
+                inds[i] = new();
+            }
+
+            CreatePhysGltfMeshes(phys, verts, inds);
+            for (var i = 0; i < groupCount; i++)
+            {
+                if (verts[i].Count < 1 || inds[i].Count < 1)
+                {
+                    continue;
+                }
+                var primitive = mesh.CreatePrimitive();
+                var accessors = new Dictionary<string, Accessor>();
+                accessors["POSITION"] = CreateAccessor(exportedModel, verts[i].ToArray());
+                foreach (var (attributeKey, accessor) in accessors)
+                {
+                    primitive.SetVertexAccessor(attributeKey, accessor);
+                }
+                primitive.WithIndicesAccessor(PrimitiveType.TRIANGLES, inds[i]);
+            }
+
+            DebugValidateGLTF();
+            loadedMeshDictionary.Add(physName, mesh);
+            return newNode.WithMesh(mesh);
+        }
+
+        private static void CreatePhysGltfMeshes(PhysAggregateData phys, List<Vector3>[] verts, List<int>[] inds)
+        {
+            for (var p = 0; p < phys.Parts.Length; p++)
+            {
+                var shape = phys.Parts[p].Shape;
+                //TODO: Spheres
+                //TODO: Capsules
+                // Hulls
+                foreach (var hull in shape.Hulls)
+                {
+                    var collisionAttributeIndex = hull.CollisionAttributeIndex;
+                    //var surfacePropertyIndex = capsule.SurfacePropertyIndex;
+
+                    var vertOffset = verts[collisionAttributeIndex].Count;
+                    foreach (var v in hull.Shape.Vertices)
+                    {
+                        var vec = v;
+                        // if (bindPose.Any())
+                        // {
+                        //     vec = Vector3.Transform(vec, bindPose[p]);
+                        // }
+
+                        verts[collisionAttributeIndex].Add(vec);
+                    }
+
+                    foreach (var face in hull.Shape.Faces)
+                    {
+                        var startEdge = face.Edge;
+                        for (var edge = hull.Shape.Edges[startEdge].Next; edge != startEdge;)
+                        {
+                            var nextEdge = hull.Shape.Edges[edge].Next;
+                            if (nextEdge == startEdge)
+                            {
+                                break;
+                            }
+
+                            inds[collisionAttributeIndex].Add(vertOffset + hull.Shape.Edges[startEdge].Origin);
+                            inds[collisionAttributeIndex].Add(vertOffset + hull.Shape.Edges[edge].Origin);
+                            inds[collisionAttributeIndex].Add(vertOffset + hull.Shape.Edges[nextEdge].Origin);
+                            edge = nextEdge;
+                        }
+                    }
+                }
+                //TODO: Mesh
+            }
+        }
+
         /// <summary>
         /// Export a Valve VMESH to Gltf.
         /// </summary>
@@ -589,7 +720,7 @@ namespace ValveResourceFormat.IO
             WriteModelFile(exportedModel, fileName);
         }
 
-        private Node AddMeshNode(ModelRoot exportedModel, Scene scene, string name,
+        private Node AddMeshNode(ModelRoot exportedModel, IVisualNodeContainer parentNode, string name,
             VMesh mesh, Node[] joints, IDictionary<string, Mesh> loadedMeshDictionary,
             string skinMaterialPath = null, VModel model = null, int meshIndex = 0)
         {
@@ -598,7 +729,7 @@ namespace ValveResourceFormat.IO
                 return null;
             }
 
-            var newNode = scene.CreateNode(name);
+            var newNode = parentNode.CreateNode(name);
             if (loadedMeshDictionary.TryGetValue(name, out var existingMesh))
             {
                 // Make a new node that uses the existing mesh
@@ -1033,14 +1164,14 @@ namespace ValveResourceFormat.IO
             return mesh;
         }
 
-        private static (Node skeletonNode, Node[] joints) CreateGltfSkeleton(Scene scene, Skeleton skeleton, string modelName)
+        private static (Node skeletonNode, Node[] joints) CreateGltfSkeleton(IVisualNodeContainer parentNode, Skeleton skeleton, string modelName)
         {
             if (skeleton.Bones.Length == 0)
             {
                 return (null, null);
             }
 
-            var skeletonNode = scene.CreateNode(modelName);
+            var skeletonNode = parentNode.CreateNode(modelName);
             var boneNodes = new Dictionary<string, Node>();
             var joints = new Node[skeleton.Bones.Length];
             foreach (var root in skeleton.Roots)
@@ -1124,6 +1255,11 @@ namespace ValveResourceFormat.IO
             renderMaterial.IntParams.TryGetValue("F_ALPHA_TEST", out var isAlphaTest);
 
             if (renderMaterial.ShaderName.EndsWith("_glass.vfx", StringComparison.InvariantCulture))
+            {
+                isTranslucent = 1;
+            }
+
+            if (renderMaterial.ShaderName.EndsWith("_overlay.vfx", StringComparison.InvariantCulture))
             {
                 isTranslucent = 1;
             }
@@ -1488,6 +1624,15 @@ namespace ValveResourceFormat.IO
 
                 return instructions;
             }
+
+            var matProps = new Dictionary<string, object>() { { "ShaderName", renderMaterial.ShaderName } };
+            if (material.Extras.Content != null)
+            {
+                var existingProps = material.Extras.Deserialize<Dictionary<string, object>>();
+                matProps = matProps.Concat(existingProps).ToDictionary(x => x.Key, x => x.Value);
+            }
+            material.Extras = JsonContent.Serialize(matProps);
+
         }
 
         /// <summary>
