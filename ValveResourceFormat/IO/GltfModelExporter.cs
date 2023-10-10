@@ -555,7 +555,10 @@ namespace ValveResourceFormat.IO
 
             var physNode = AddModelPhys(exportedModel, parentNode ?? scene, name,
                 loadedMeshDictionary, model);
-            physNode.WorldMatrix = transform * TRANSFORMSOURCETOGLTF;
+            if (physNode != null)
+            {
+                physNode.WorldMatrix = transform * TRANSFORMSOURCETOGLTF;
+            }
 
 
             // Even though that's not documented, order matters.
@@ -609,16 +612,7 @@ namespace ValveResourceFormat.IO
             }
 
             var physName = string.Concat(name, ".PHY");
-            var newNode = parentNode.CreateNode(physName);
-            if (loadedMeshDictionary.TryGetValue(physName, out var existingMesh))
-            {
-                // Make a new node that uses the existing mesh
-                newNode.Mesh = existingMesh;
-                return newNode;
-            }
-
-            var mesh = exportedModel.CreateMesh(physName);
-            mesh.Name = physName;
+            var physNode = parentNode.CreateNode(physName);
 
             var groupCount = phys.CollisionAttributes.Count;
             var verts = new List<Vector3>[groupCount];
@@ -636,19 +630,40 @@ namespace ValveResourceFormat.IO
                 {
                     continue;
                 }
-                var primitive = mesh.CreatePrimitive();
-                var accessors = new Dictionary<string, Accessor>();
-                accessors["POSITION"] = CreateAccessor(exportedModel, verts[i].ToArray());
-                foreach (var (attributeKey, accessor) in accessors)
+
+                var attributes = phys.CollisionAttributes[i];
+                var tags = attributes.GetArray<string>("m_InteractAsStrings")
+                    ?? attributes.GetArray<string>("m_PhysicsTagStrings");
+                var group = attributes.GetStringProperty("m_CollisionGroupString");
+                var groupName = $"{string.Join("_", tags)}";
+                if (group != null)
                 {
-                    primitive.SetVertexAccessor(attributeKey, accessor);
+                    groupName = $"{groupName}{(groupName.Length > 1 ? "." : "")}{group}";
                 }
-                primitive.WithIndicesAccessor(PrimitiveType.TRIANGLES, inds[i]);
+
+                var physMeshName = string.Format("{0}.Mesh_{1}", physName, i);
+                loadedMeshDictionary.TryGetValue(physMeshName, out var mesh);
+                if (mesh == null)
+                {
+                    mesh = exportedModel.CreateMesh(physMeshName);
+                    mesh.Name = physMeshName;
+
+                    var primitive = mesh.CreatePrimitive();
+                    var accessors = new Dictionary<string, Accessor>();
+                    accessors["POSITION"] = CreateAccessor(exportedModel, verts[i].ToArray());
+                    foreach (var (attributeKey, accessor) in accessors)
+                    {
+                        primitive.SetVertexAccessor(attributeKey, accessor);
+                    }
+                    primitive.WithIndicesAccessor(PrimitiveType.TRIANGLES, inds[i]);
+
+                    loadedMeshDictionary.Add(physMeshName, mesh);
+                }
+                physNode.CreateNode(string.Format("{0}.{1}", physName, groupName)).WithMesh(mesh);
             }
 
             DebugValidateGLTF();
-            loadedMeshDictionary.Add(physName, mesh);
-            return newNode.WithMesh(mesh);
+            return physNode;
         }
 
         private static void CreatePhysGltfMeshes(PhysAggregateData phys, List<Vector3>[] verts, List<int>[] inds)
@@ -662,18 +677,16 @@ namespace ValveResourceFormat.IO
                 foreach (var hull in shape.Hulls)
                 {
                     var collisionAttributeIndex = hull.CollisionAttributeIndex;
-                    //var surfacePropertyIndex = capsule.SurfacePropertyIndex;
 
                     var vertOffset = verts[collisionAttributeIndex].Count;
                     foreach (var v in hull.Shape.Vertices)
                     {
-                        var vec = v;
                         // if (bindPose.Any())
                         // {
-                        //     vec = Vector3.Transform(vec, bindPose[p]);
+                        //     v = Vector3.Transform(v, bindPose[p]);
                         // }
 
-                        verts[collisionAttributeIndex].Add(vec);
+                        verts[collisionAttributeIndex].Add(v);
                     }
 
                     foreach (var face in hull.Shape.Faces)
@@ -694,7 +707,28 @@ namespace ValveResourceFormat.IO
                         }
                     }
                 }
-                //TODO: Mesh
+                // Mesh
+                foreach (var mesh in shape.Meshes)
+                {
+                    var collisionAttributeIndex = mesh.CollisionAttributeIndex;
+                    var vertOffset = verts[collisionAttributeIndex].Count;
+                    foreach (var v in mesh.Shape.Vertices)
+                    {
+                        // if (bindPose.Any())
+                        // {
+                        //     v = Vector3.Transform(vec, bindPose[p]);
+                        // }
+
+                        verts[collisionAttributeIndex].Add(v);
+                    }
+
+                    foreach (var tri in mesh.Shape.Triangles)
+                    {
+                        inds[collisionAttributeIndex].Add(vertOffset + tri.Indices[0]);
+                        inds[collisionAttributeIndex].Add(vertOffset + tri.Indices[1]);
+                        inds[collisionAttributeIndex].Add(vertOffset + tri.Indices[2]);
+                    }
+                }
             }
         }
 
