@@ -241,16 +241,6 @@ namespace ValveResourceFormat.IO
                     // Add environment lights with KHR_lights_punctual
                     if (className == "light_environment")
                     {
-                        Vector3 GetEulerAngles(Matrix4x4 m)
-                        {
-                            float yAngle = (float)Math.Atan2(m.M31, m.M11);
-                            float xAngle = (float)Math.Atan2(-m.M21, Math.Sqrt(m.M11 * m.M11 + m.M31 * m.M31));
-                            float zAngle = (float)Math.Atan2(m.M12, m.M22);
-
-                            return new Vector3(xAngle, yAngle, zAngle) * (float)(180 / Math.PI);
-                        }
-                        var angles = GetEulerAngles(node.LocalMatrix);
-
                         float intensity = (float)entity.GetProperty<double>("skyintensity");
                         var envLight = exportedModel.CreatePunctualLight(PunctualLightType.Directional)
                             .WithColor(Vector3.One, intensity * PBRWATTSTOLUMENS);
@@ -262,30 +252,21 @@ namespace ValveResourceFormat.IO
                         var anglesUntyped = entity.GetProperty("angles");
 
                         var scaleMatrix = Matrix4x4.CreateScale(EntityTransformHelper.ParseVector(scale));
-
                         var positionVector = EntityTransformHelper.ParseVector(position);
                         var positionMatrix = Matrix4x4.CreateTranslation(positionVector);
-
                         var pitchYawRoll = anglesUntyped.Type switch
                         {
                             EntityFieldType.CString => EntityTransformHelper.ParseVector((string)anglesUntyped.Data),
                             EntityFieldType.Vector => (Vector3)anglesUntyped.Data,
                             _ => throw new NotImplementedException($"Unsupported angles type {anglesUntyped.Type}"),
                         };
-
                         var rollMatrix = Matrix4x4.CreateRotationX(pitchYawRoll.Z * MathF.PI / 180f);
                         var pitchMatrix = Matrix4x4.CreateRotationY((pitchYawRoll.X - 90) * MathF.PI / 180f);
                         var yawMatrix = Matrix4x4.CreateRotationZ(pitchYawRoll.Y * MathF.PI / 180f);
 
                         var rotationMatrix = rollMatrix * pitchMatrix * yawMatrix;
-
-
                         node.LocalMatrix =
                             scaleMatrix * rotationMatrix * positionMatrix * TRANSFORMSOURCETOGLTF;
-
-                        // convert to xyz rot
-                        var angles2 = GetEulerAngles(node.LocalMatrix);
-                        System.Console.Out.WriteLine();
                     }
                     continue;
                 }
@@ -668,7 +649,9 @@ namespace ValveResourceFormat.IO
             var physName = string.Concat(name, ".PHY");
             var physNode = parentNode.CreateNode(physName);
 
-            var groupCount = phys.CollisionAttributes.Count;
+            var shapeTypeNames = new string[] { "Sphere", "Capsule", "Hull", "Mesh" };
+            int shapeTypeCount = shapeTypeNames.Length;
+            var groupCount = phys.CollisionAttributes.Count * shapeTypeCount;
             var verts = new List<Vector3>[groupCount];
             var inds = new List<int>[groupCount];
             for (var i = 0; i < groupCount; i++)
@@ -685,7 +668,7 @@ namespace ValveResourceFormat.IO
                     continue;
                 }
 
-                var attributes = phys.CollisionAttributes[i];
+                var attributes = phys.CollisionAttributes[i / shapeTypeCount];
                 var tags = attributes.GetArray<string>("m_InteractAsStrings")
                     ?? attributes.GetArray<string>("m_PhysicsTagStrings");
                 var group = attributes.GetStringProperty("m_CollisionGroupString");
@@ -713,7 +696,8 @@ namespace ValveResourceFormat.IO
 
                     loadedMeshDictionary.Add(physMeshName, mesh);
                 }
-                physNode.CreateNode(string.Format("{0}.{1}", physName, groupName)).WithMesh(mesh);
+                physNode.CreateNode($"{physName}.{shapeTypeNames[i % shapeTypeCount]}.{groupName}"
+                    ).WithMesh(mesh);
             }
 
             DebugValidateGLTF();
@@ -731,6 +715,7 @@ namespace ValveResourceFormat.IO
                 foreach (var hull in shape.Hulls)
                 {
                     var collisionAttributeIndex = hull.CollisionAttributeIndex;
+                    collisionAttributeIndex = collisionAttributeIndex * 4 + 2;
 
                     var vertOffset = verts[collisionAttributeIndex].Count;
                     foreach (var v in hull.Shape.Vertices)
@@ -765,6 +750,8 @@ namespace ValveResourceFormat.IO
                 foreach (var mesh in shape.Meshes)
                 {
                     var collisionAttributeIndex = mesh.CollisionAttributeIndex;
+                    collisionAttributeIndex = collisionAttributeIndex * 4 + 3;
+
                     var vertOffset = verts[collisionAttributeIndex].Count;
                     foreach (var v in mesh.Shape.Vertices)
                     {
