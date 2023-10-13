@@ -37,6 +37,7 @@ namespace ValveResourceFormat.IO
         // Also divides by 100, gltf units are in meters, source engine units are in inches
         // https://github.com/KhronosGroup/glTF/tree/master/specification/2.0#coordinate-system-and-units
         private readonly Matrix4x4 TRANSFORMSOURCETOGLTF = Matrix4x4.CreateScale(0.0254f) * Matrix4x4.CreateFromYawPitchRoll(0, MathF.PI / -2f, MathF.PI / -2f);
+        private readonly float PBRWATTSTOLUMENS = 683;
 
         public IProgress<string> ProgressReporter { get; set; }
         public IFileLoader FileLoader { get; }
@@ -177,10 +178,9 @@ namespace ValveResourceFormat.IO
                 var worldNode = (VWorldNode)worldResource.DataBlock;
                 var worldNodeModels = LoadWorldNodeModels(worldNode);
 
-                var worldNodesParent = scene.CreateNode("world_nodes");
                 foreach (var (Model, Name, Transform) in worldNodeModels)
                 {
-                    LoadModel(exportedModel, scene, Model, Name, Transform, loadedMeshDictionary, worldNodesParent);
+                    LoadModel(exportedModel, scene, Model, Name, Transform, loadedMeshDictionary);
                 }
             }
 
@@ -208,13 +208,20 @@ namespace ValveResourceFormat.IO
         private void LoadEntityMeshes(ModelRoot exportedModel, Scene scene, VEntityLump entityLump,
             Dictionary<string, Mesh> loadedMeshDictionary)
         {
-            var entitiesNode = scene.CreateNode("entities");
             foreach (var entity in entityLump.GetEntities())
             {
                 var modelName = entity.GetProperty<string>("model");
                 var className = entity.GetProperty<string>("classname");
-                var props = entity.Properties.ToDictionary(e => e.Value.Name, e => e.Value.Data);
+                var props = entity.Properties.ToDictionary(e => e.Value.Name, e =>
+                {
+                    if (e.Value.Data == null)
+                    {
+                        return "null";
+                    }
+                    return e.Value.Data;
+                });
                 var transform = EntityTransformHelper.CalculateTransformationMatrix(entity);
+                Node node = null;
                 if (!string.IsNullOrEmpty(entity.GetProperty<string>("origin")))
                 {
                     // remove xform props
@@ -223,17 +230,64 @@ namespace ValveResourceFormat.IO
                     props.Remove("scales");
                     if (className != null)
                     {
-                        var node = entitiesNode.CreateNode(className);
+                        node = scene.CreateNode(className);
                         // Swap Rotate upright, scale inches to meters.
-                        node.WorldMatrix = transform * TRANSFORMSOURCETOGLTF;
+                        node.LocalMatrix = transform * TRANSFORMSOURCETOGLTF;
                         node.Extras = JsonContent.Serialize(props);
                     }
                 }
                 if (string.IsNullOrEmpty(modelName))
                 {
-                    // Only worrying about models for now
+                    // Add environment lights with KHR_lights_punctual
+                    if (className == "light_environment")
+                    {
+                        Vector3 GetEulerAngles(Matrix4x4 m)
+                        {
+                            float yAngle = (float)Math.Atan2(m.M31, m.M11);
+                            float xAngle = (float)Math.Atan2(-m.M21, Math.Sqrt(m.M11 * m.M11 + m.M31 * m.M31));
+                            float zAngle = (float)Math.Atan2(m.M12, m.M22);
+
+                            return new Vector3(xAngle, yAngle, zAngle) * (float)(180 / Math.PI);
+                        }
+                        var angles = GetEulerAngles(node.LocalMatrix);
+
+                        float intensity = (float)entity.GetProperty<double>("skyintensity");
+                        var envLight = exportedModel.CreatePunctualLight(PunctualLightType.Directional)
+                            .WithColor(Vector3.One, intensity * PBRWATTSTOLUMENS);
+                        node.PunctualLight = envLight;
+
+                        // get transform to fit with glTF light direction (point along -z)
+                        var scale = entity.GetProperty<string>("scales");
+                        var position = entity.GetProperty<string>("origin");
+                        var anglesUntyped = entity.GetProperty("angles");
+
+                        var scaleMatrix = Matrix4x4.CreateScale(EntityTransformHelper.ParseVector(scale));
+
+                        var positionVector = EntityTransformHelper.ParseVector(position);
+                        var positionMatrix = Matrix4x4.CreateTranslation(positionVector);
+
+                        var pitchYawRoll = anglesUntyped.Type switch
+                        {
+                            EntityFieldType.CString => EntityTransformHelper.ParseVector((string)anglesUntyped.Data),
+                            EntityFieldType.Vector => (Vector3)anglesUntyped.Data,
+                            _ => throw new NotImplementedException($"Unsupported angles type {anglesUntyped.Type}"),
+                        };
+
+                        var rollMatrix = Matrix4x4.CreateRotationX(pitchYawRoll.Z * MathF.PI / 180f);
+                        var pitchMatrix = Matrix4x4.CreateRotationY((pitchYawRoll.X - 90) * MathF.PI / 180f);
+                        var yawMatrix = Matrix4x4.CreateRotationZ(pitchYawRoll.Y * MathF.PI / 180f);
+
+                        var rotationMatrix = rollMatrix * pitchMatrix * yawMatrix;
+
+
+                        node.LocalMatrix =
+                            scaleMatrix * rotationMatrix * positionMatrix * TRANSFORMSOURCETOGLTF;
+
+                        // convert to xyz rot
+                        var angles2 = GetEulerAngles(node.LocalMatrix);
+                        System.Console.Out.WriteLine();
+                    }
                     continue;
-                    // TODO: Think about adding lights with KHR_lights_punctual
                 }
 
                 var modelResource = FileLoader.LoadFile(modelName + "_c");
@@ -253,7 +307,7 @@ namespace ValveResourceFormat.IO
 
                 // Add meshes and their skeletons
                 LoadModel(exportedModel, scene, model, Path.GetFileNameWithoutExtension(modelName),
-                    transform, loadedMeshDictionary, entitiesNode, skinName, JsonContent.Serialize(props));
+                    transform, loadedMeshDictionary, node, skinName, JsonContent.Serialize(props));
             }
 
             foreach (var childEntityName in entityLump.GetChildEntityNames())
@@ -376,7 +430,7 @@ namespace ValveResourceFormat.IO
 #endif
 
             CancellationToken.ThrowIfCancellationRequested();
-            var (skeletonNode, joints) = CreateGltfSkeleton(parentNode ?? scene, model.Skeleton, name);
+            var (skeletonNode, joints) = CreateGltfSkeleton(scene, model.Skeleton, name);
 
             if (skeletonNode != null)
             {
@@ -557,7 +611,7 @@ namespace ValveResourceFormat.IO
                 loadedMeshDictionary, model);
             if (physNode != null)
             {
-                physNode.WorldMatrix = transform * TRANSFORMSOURCETOGLTF;
+                physNode.WorldMatrix = transform;
             }
 
 
