@@ -718,7 +718,7 @@ namespace ValveResourceFormat.IO
                     collisionAttributeIndex = collisionAttributeIndex * 4 + 2;
 
                     var vertOffset = verts[collisionAttributeIndex].Count;
-                    foreach (var v in hull.Shape.Vertices)
+                    foreach (var v in hull.Shape.VertexPositions)
                     {
                         // if (bindPose.Any())
                         // {
@@ -1239,7 +1239,7 @@ namespace ValveResourceFormat.IO
             return mesh;
         }
 
-        private static (Node skeletonNode, Node[] joints) CreateGltfSkeleton(IVisualNodeContainer parentNode, Skeleton skeleton, string modelName)
+        private static (Node skeletonNode, Node[] joints) CreateGltfSkeleton(Scene parentNode, Skeleton skeleton, string modelName)
         {
             if (skeleton.Bones.Length == 0)
             {
