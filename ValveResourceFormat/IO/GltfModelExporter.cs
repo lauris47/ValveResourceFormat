@@ -1329,6 +1329,8 @@ namespace ValveResourceFormat.IO
             renderMaterial.IntParams.TryGetValue("F_TRANSLUCENT", out var isTranslucent);
             renderMaterial.IntParams.TryGetValue("F_ALPHA_TEST", out var isAlphaTest);
 
+            var matProps = new Dictionary<string, object>() { { "ShaderName", renderMaterial.ShaderName } };
+
             if (renderMaterial.ShaderName.EndsWith("_glass.vfx", StringComparison.InvariantCulture))
             {
                 isTranslucent = 1;
@@ -1337,6 +1339,14 @@ namespace ValveResourceFormat.IO
             if (renderMaterial.ShaderName.EndsWith("_overlay.vfx", StringComparison.InvariantCulture))
             {
                 isTranslucent = 1;
+                if (renderMaterial.IntParams.TryGetValue("F_BLEND_MODE", out var blendMode))
+                {
+                    matProps["F_BLEND_MODE"] = blendMode;
+                }
+                if (renderMaterial.IntParams.TryGetValue("F_LIT", out var lit))
+                {
+                    matProps["F_LIT"] = lit;
+                }
             }
 
             material.Alpha = isTranslucent > 0 ? AlphaMode.BLEND : (isAlphaTest > 0 ? AlphaMode.MASK : AlphaMode.OPAQUE);
@@ -1700,7 +1710,6 @@ namespace ValveResourceFormat.IO
                 return instructions;
             }
 
-            var matProps = new Dictionary<string, object>() { { "ShaderName", renderMaterial.ShaderName } };
             if (material.Extras.Content != null)
             {
                 var existingProps = material.Extras.Deserialize<Dictionary<string, object>>();
