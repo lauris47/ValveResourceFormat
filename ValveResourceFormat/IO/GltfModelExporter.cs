@@ -1213,6 +1213,10 @@ namespace ValveResourceFormat.IO
                     // Check if material already exists - makes an assumption that if material has the same name it is a duplicate
                     var existingMaterial = exportedModel.LogicalMaterials.SingleOrDefault(m =>
                     {
+                        if (m.Name != materialNameTrimmed)
+                        {
+                            return false;
+                        }
                         var mTintColorVal = m.Extras.Deserialize<Dictionary<string, JsonElement>>()["tintColor"];
                         for (var i = 0; i < 3; i++)
                         {
