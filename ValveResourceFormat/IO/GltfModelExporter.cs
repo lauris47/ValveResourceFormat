@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using SharpGLTF.IO;
@@ -1150,6 +1151,9 @@ namespace ValveResourceFormat.IO
                     var indexBufferIndex = indexBufferInfo.GetInt32Property("m_hBuffer");
                     var indexBuffer = vbib.IndexBuffers[indexBufferIndex];
 
+                    var tintColorArray = drawCall.GetArray<double>("m_vTintColor") ?? [1.0, 1.0, 1.0, 1.0];
+                    var tintColor = new Vector4(tintColorArray.Append(1.0).Select(x => (float)x).ToArray());
+
                     // Create one primitive per draw call
                     var primitive = mesh.CreatePrimitive();
 
@@ -1207,7 +1211,15 @@ namespace ValveResourceFormat.IO
                     var materialNameTrimmed = Path.GetFileNameWithoutExtension(materialPath);
 
                     // Check if material already exists - makes an assumption that if material has the same name it is a duplicate
-                    var existingMaterial = exportedModel.LogicalMaterials.SingleOrDefault(m => m.Name == materialNameTrimmed);
+                    var existingMaterial = exportedModel.LogicalMaterials.SingleOrDefault(m =>
+                    {
+                        var mTintColorVal = m.Extras.Deserialize<Dictionary<string, JsonElement>>()["tintColor"];
+                        for (var i = 0; i < 3; i++)
+                        {
+                            if (mTintColorVal[i].GetDouble() != tintColorArray[i]) return false;
+                        }
+                        return true;
+                    });
                     if (existingMaterial != null)
                     {
                         ProgressReporter?.Report($"Found existing material: {materialNameTrimmed}");
@@ -1228,10 +1240,11 @@ namespace ValveResourceFormat.IO
                         .CreateMaterial(materialNameTrimmed)
                         .WithDefault();
                     primitive.WithMaterial(material);
+                    material.Extras = JsonContent.Serialize(new Dictionary<string, object>() { { "tintColor", tintColorArray } });
 
                     var renderMaterial = (VMaterial)materialResource.DataBlock;
 
-                    var task = GenerateGLTFMaterialFromRenderMaterial(material, renderMaterial, exportedModel);
+                    var task = GenerateGLTFMaterialFromRenderMaterial(material, tintColor, renderMaterial, exportedModel);
                     MaterialGenerationTasks.Add(task);
                 }
             }
@@ -1320,7 +1333,7 @@ namespace ValveResourceFormat.IO
             ["Emissive"] = new[] { (ChannelMapping.R, "TextureSelfIllumMask") },
         };
 
-        private async Task GenerateGLTFMaterialFromRenderMaterial(Material material, VMaterial renderMaterial, ModelRoot model)
+        private async Task GenerateGLTFMaterialFromRenderMaterial(Material material, Vector4 tintColor, VMaterial renderMaterial, ModelRoot model)
         {
             await Task.Yield(); // Yield as the first step so it doesn't actually block
 
@@ -1374,11 +1387,11 @@ namespace ValveResourceFormat.IO
                 metalValue = flMetalness;
             }
 
-            var baseColor = Vector4.One;
+            var baseColor = tintColor;
 
             if (renderMaterial.VectorParams.TryGetValue("g_vColorTint", out var vColorTint))
             {
-                baseColor = vColorTint;
+                baseColor *= vColorTint;
                 baseColor.W = 1; //Tint only affects color
             }
 
@@ -1639,13 +1652,10 @@ namespace ValveResourceFormat.IO
 
                 if (gltfPackedName == "BaseColor")
                 {
-                    material.Extras = JsonContent.CreateFrom(new Dictionary<string, object>
+                    matProps["baseColorTexture"] = new Dictionary<string, object>
                     {
-                        ["baseColorTexture"] = new Dictionary<string, object>
-                            {
-                                { "index", tex.PrimaryImage.LogicalIndex },
-                            },
-                    });
+                        { "index", tex.PrimaryImage.LogicalIndex },
+                    };
                 }
                 else if (gltfPackedName == "MetallicRoughness")
                 {
