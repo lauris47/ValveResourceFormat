@@ -1391,7 +1391,12 @@ namespace ValveResourceFormat.IO
                 metalValue = flMetalness;
             }
 
-            var baseColor = tintColor;
+            float modelTintAmount = 1;
+            if (renderMaterial.FloatParams.TryGetValue("g_flModelTintAmount", out var flModelTintAmount))
+            {
+                modelTintAmount = flModelTintAmount;
+            }
+            var baseColor = Vector4.Lerp(Vector4.One, tintColor, modelTintAmount);
 
             if (renderMaterial.VectorParams.TryGetValue("g_vColorTint", out var vColorTint))
             {
