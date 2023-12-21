@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Numerics;
+using SharpGLTF.IO;
 using SharpGLTF.Schema2;
 using ValveResourceFormat.ResourceTypes;
 using ValveResourceFormat.Serialization;
@@ -70,8 +71,11 @@ namespace ValveResourceFormat.IO
 
                     loadedMeshDictionary.Add(physMeshName, mesh);
                 }
-                physNode.CreateNode($"{physName}.{shapeTypeNames[i % shapeTypeCount]}.{groupName}"
+                var meshNode = physNode.CreateNode($"{physName}.{shapeTypeNames[i % shapeTypeCount]}.{groupName}"
                     ).WithMesh(mesh);
+                var props = new Dictionary<string, object>();
+                props["PHY.Shape"] = shapeTypeNames[i % shapeTypeCount];
+                meshNode.Extras = JsonContent.Serialize(props);
             }
 
             GltfModelExporter.DebugValidateGLTF();
