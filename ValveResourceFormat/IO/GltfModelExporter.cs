@@ -1111,7 +1111,8 @@ namespace ValveResourceFormat.IO
 
                     var renderMaterial = (VMaterial)materialResource.DataBlock;
 
-                    var task = GenerateGLTFMaterialFromRenderMaterial(material, tintColor, renderMaterial, exportedModel);
+
+                    var task = GenerateGLTFMaterialFromRenderMaterial(material, materialPath, tintColor, renderMaterial, exportedModel);
                     MaterialGenerationTasks.Add(task);
                 }
             }
@@ -1200,7 +1201,7 @@ namespace ValveResourceFormat.IO
             ["Emissive"] = new[] { (ChannelMapping.R, "TextureSelfIllumMask") },
         };
 
-        private async Task GenerateGLTFMaterialFromRenderMaterial(Material material, Vector4 tintColor, VMaterial renderMaterial, ModelRoot model)
+        private async Task GenerateGLTFMaterialFromRenderMaterial(Material material, string materialPath, Vector4 tintColor, VMaterial renderMaterial, ModelRoot model)
         {
             await Task.Yield(); // Yield as the first step so it doesn't actually block
 
@@ -1226,6 +1227,43 @@ namespace ValveResourceFormat.IO
                 if (renderMaterial.IntParams.TryGetValue("F_LIT", out var lit))
                 {
                     matProps["F_LIT"] = lit;
+                }
+            }
+
+            //TODO move
+            string csRoot = "C:/Program Files (x86)/Steam/steamapps/common/Counter-Strike Global Offensive/game/csgo/";
+            //End TODO move
+
+            string fullPathToMat = Path.Combine(csRoot, materialPath);
+
+            //Textures - compiled and default
+            foreach (string valTex in MaterialPropertyFinder.ValveMaterialTexturesCompiled)
+            {
+                var textPath = MaterialPropertyFinder.GetTexturePath(fullPathToMat, valTex);
+                ProgressReporter?.Report("Looking for material: " + fullPathToMat + " Texture property: " + valTex + " with value: " + textPath);
+                if (textPath.Length > 4)
+                {
+                    matProps.Add(valTex, textPath);
+                }
+            }
+            //Vector4 / Color
+            foreach (string valVect in MaterialPropertyFinder.ValveMaterialVectors)
+            {
+                var vector4 = MaterialPropertyFinder.TryGetVector4Value(fullPathToMat, valVect);
+                if (vector4.HasValue)
+                {
+                    ProgressReporter?.Report("Looking for material: " + fullPathToMat + " Vector4 property: " + valVect + " with value: " + vector4);
+                    matProps.Add(valVect, vector4.Value.ToString());
+                }
+            }
+            //Scalar values
+            foreach (string scalar in MaterialPropertyFinder.ValveMaterialScalars)
+            {
+                var value = MaterialPropertyFinder.TryGetScalarValue(fullPathToMat, scalar);
+                if (value.HasValue)
+                {
+                    ProgressReporter?.Report("Looking for material: " + fullPathToMat + " Scalar property: " + scalar + " with value: " + value.Value);
+                    matProps.Add(scalar, value.Value.ToString());
                 }
             }
 
